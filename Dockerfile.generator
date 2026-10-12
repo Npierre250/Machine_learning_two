@@ -1,0 +1,10 @@
+# Dockerfile.generator
+FROM python:3.9-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir numpy==1.26.4
+
+COPY simulate_factory_data.py /app/simulate_factory_data.py
+
+CMD ["python", "/app/simulate_factory_data.py"]

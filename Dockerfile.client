@@ -1,0 +1,30 @@
+# Dockerfile.client
+# PyFlink 1.18 client with numpy pre-installed
+FROM flink:1.18.1-scala_2.12-java11
+
+# Install Python 3 + pip
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip first to avoid resolution issues
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install deps separately to avoid conflict
+RUN pip3 install --no-cache-dir numpy==1.26.4
+RUN pip3 install --no-cache-dir pandas==2.2.2
+RUN pip3 install --no-cache-dir apache-flink==1.18.1 --no-deps
+RUN pip3 install --no-cache-dir apache-flink-libraries==1.18.1 --no-deps || true
+
+# Download JDBC connector JARs into Flink lib directory
+RUN curl -fsSL \
+    "https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc/3.1.2-1.18/flink-connector-jdbc-3.1.2-1.18.jar" \
+    -o /opt/flink/lib/flink-connector-jdbc.jar
+
+RUN curl -fsSL \
+    "https://jdbc.postgresql.org/download/postgresql-42.7.3.jar" \
+    -o /opt/flink/lib/postgresql-42.7.3.jar
+
+WORKDIR /app
+
+CMD ["tail", "-f", "/dev/null"]

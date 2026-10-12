@@ -1,0 +1,6 @@
+# Core
+numpy==1.26.4
+pandas==2.2.2
+
+# PyFlink (install manually inside Flink containers, not globally)
+# apache-flink==1.18.1

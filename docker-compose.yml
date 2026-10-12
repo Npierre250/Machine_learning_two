@@ -1,0 +1,191 @@
+version: "3.8"
+
+# ============================================================
+#  Flink AE Sensor Processing — Full Stack
+# ============================================================
+#
+#  Services:
+#    postgres          — PostgreSQL 15 (results DB)
+#    flink-jobmanager  — Flink 1.18 JobManager
+#    flink-taskmanager — 3 × TaskManager (parallelism 3)
+#    ae-trainer        — Trains autoencoder on first run, then exits
+#    flink-client      — PyFlink client (run streaming/batch jobs)
+#    data-generator    — Streams sensor data over TCP socket
+#
+#  Quick start:
+#    docker-compose up -d
+#    docker exec -it flink-client bash
+#    > python /app/flink-job/streaming_sensor_analyzer.py
+#
+# ============================================================
+
+x-flink-common: &flink-common
+  image: flink:1.18.1-scala_2.12-java11
+  environment:
+    - FLINK_PROPERTIES=jobmanager.rpc.address:flink-jobmanager
+  networks:
+    - flink-net
+
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: flink-postgres
+    environment:
+      POSTGRES_DB:       flink_db
+      POSTGRES_USER:     flink_user
+      POSTGRES_PASSWORD: flink_password
+    ports:
+      - "5435:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flink_user -d flink_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - flink-net
+
+  # ── Flink JobManager ─────────────────────────────────────────
+  flink-jobmanager:
+    <<: *flink-common
+    container_name: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "8081:8081"    # Flink Web UI
+      - "9000:9000"    # Socket source port
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── Flink TaskManagers (×3) ───────────────────────────────────
+  flink-taskmanager-1:
+    <<: *flink-common
+    container_name: flink-taskmanager-1
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+
+  flink-taskmanager-2:
+    <<: *flink-common
+    container_name: flink-taskmanager-2
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+
+  flink-taskmanager-3:
+    <<: *flink-common
+    container_name: flink-taskmanager-3
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+
+  # ── Autoencoder Trainer ───────────────────────────────────────
+  # Runs ONCE on startup; trains the AE and saves weights to /app/autoencoder/.
+  # Other services share the same volume so the model is immediately available.
+  ae-trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.trainer
+    container_name: ae-trainer
+    environment:
+      MODEL_DIR: /app/autoencoder
+    volumes:
+      - ae_model:/app/autoencoder
+      - ./autoencoder:/app/autoencoder-src:ro
+    command: python /app/autoencoder-src/train_autoencoder.py
+    restart: "no"      # Exit after training; don't restart
+    networks:
+      - flink-net
+
+  # ── PyFlink Client ────────────────────────────────────────────
+  flink-client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: flink-client-pyflink
+    depends_on:
+      ae-trainer:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      flink-jobmanager:
+        condition: service_healthy
+    environment:
+      FLINK_HOST: flink-jobmanager
+      FLINK_PORT: "9000"
+      MODEL_DIR:  /app/autoencoder
+      PG_USER:    flink_user
+      PG_PASS:    flink_password
+    volumes:
+      - ae_model:/app/autoencoder:ro
+      - ./flink-job:/app/flink-job:ro
+      - sensor_data:/app/data
+    stdin_open: true
+    tty: true
+    command: tail -f /dev/null
+    networks:
+      - flink-net
+
+  # ── Data Generator ────────────────────────────────────────────
+  data-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile.generator
+    container_name: data-generator
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    environment:
+      MODE:       stream
+      FLINK_HOST: flink-jobmanager
+      FLINK_PORT: "9000"
+      FAULT_PROB: "0.15"
+    volumes:
+      - sensor_data:/app/data
+    command: >
+      python /app/simulate_factory_data.py
+        --mode stream
+        --host flink-jobmanager
+        --port 9000
+        --interval 0.5
+        --fault-prob 0.15
+    restart: unless-stopped
+    networks:
+      - flink-net
+
+  # ── Batch data pre-generator (creates large CSV for batch job) ─
+  batch-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile.generator
+    container_name: batch-generator
+    environment:
+      MODE: batch
+    volumes:
+      - sensor_data:/app/data
+    command: >
+      python /app/simulate_factory_data.py
+        --mode batch
+        --n-rows 50000
+        --output /app/data/factory_sensor_simulator_2040.csv
+    restart: "no"
+    networks:
+      - flink-net
+
+volumes:
+  pg_data:
+  ae_model:      # Shared between ae-trainer and flink-client
+  sensor_data:   # Shared between batch-generator and flink-client
+
+networks:
+  flink-net:
+    driver: bridge

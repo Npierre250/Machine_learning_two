@@ -1,0 +1,12 @@
+# Dockerfile.trainer
+# Minimal Python image to train the autoencoder (no Flink needed)
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# NumPy + Pandas are the only runtime dependencies
+RUN pip install --no-cache-dir numpy==1.26.4 pandas==2.2.2
+
+# Source is mounted as a read-only volume at runtime
+# (see docker-compose.yml ae-trainer service)
+CMD ["python", "/app/autoencoder-src/train_autoencoder.py"]
